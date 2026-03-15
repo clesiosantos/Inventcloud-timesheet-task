@@ -1,8 +1,9 @@
+= 5) e restaurada a privacidade da tarefa.">
 <?php
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.4.4
+ * Versão: 1.4.5
  */
 
 class EnvLoader {
@@ -120,6 +121,7 @@ class GLPISync {
         try {
             $filterSql = $targetTicketId ? "AND t.ticket_id = :ticket_id" : "";
             
+            // SQL Atualizado: Agora junta com a tabela glpi_tickets para validar o status
             $sql = "
                 SELECT
                     t.resposta_id, t.ticket_id, u.id AS requisitante_id, u.name AS requisitante,
@@ -144,7 +146,9 @@ class GLPISync {
                     WHERE fa.plugin_formcreator_forms_id = 142 AND q.id IN (1643,1651,1652,1654,1655)
                 ) t
                 LEFT JOIN glpi_users u ON u.id = t.requester_id
+                JOIN glpi_tickets gt ON gt.id = t.ticket_id
                 WHERE t.ticket_id IS NOT NULL
+                AND gt.status < 5 -- Apenas chamados que não estejam Solucionados (5) ou Fechados (6)
                 $filterSql
                 AND NOT EXISTS (SELECT 1 FROM glpi_tickettasks tt WHERE tt.tickets_id = t.ticket_id)
                 GROUP BY t.resposta_id, t.ticket_id, u.id, u.name
@@ -157,25 +161,27 @@ class GLPISync {
             $stmt->execute();
             $pendentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
-            $this->log('Info', count($pendentes) . ' tarefas pendentes encontradas');
+            $this->log('Info', count($pendentes) . ' tarefas pendentes em chamados ABERTOS encontradas');
 
             foreach ($pendentes as $task) {
                 $prefix = $task['tipo_atendimento'] ? "[{$task['tipo_atendimento']}] " : "";
                 
-                // PAYLOAD MINIMIZADO PARA TESTE DE PERMISSÃO
                 $payload = [
                     'tickets_id' => (int)$task['ticket_id'],
                     'content' => $prefix . $task['titulo'],
                     'actiontime' => (int)$task['segundos'],
                     'begin' => $task['data_inicio'],
                     'end' => $task['data_fim'],
-                    'is_private' => 0, // Tentar como pública
-                    'state' => 2       // Mantido como "Feito"
+                    'is_private' => 1, // Voltamos para privada
+                    'state' => 2       // Done
                 ];
 
-                // Atribuição de técnico (opcional, vamos manter para ver se o erro é aqui)
                 if ((int)$task['requisitante_id'] > 0) {
                     $payload['users_id_tech'] = (int)$task['requisitante_id'];
+                }
+                
+                if ((int)$task['area_atuacao_codigo'] > 0) {
+                    $payload['groups_id_tech'] = (int)$task['area_atuacao_codigo'];
                 }
 
                 $res = $this->callAPI('TicketTask', 'POST', $payload);
