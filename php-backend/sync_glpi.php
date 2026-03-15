@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.5.7
+ * Versão: 1.6.0
  */
 
 class EnvLoader {
@@ -137,11 +137,19 @@ class GLPISync {
             
             $sql = "
                 SELECT
-                    t.resposta_id, t.ticket_id, u.id AS requisitante_id,
+                    t.resposta_id, t.ticket_id,
+                    tk.date_mod AS data_modificacao,
+                    tk.solvedate AS data_solucao,
+                    tk.closedate AS data_fechamento,
+                    u.id AS requisitante_id,
+                    u.name AS requisitante,
                     MAX(CASE WHEN t.id_pergunta = 1643 THEN t.resposta END) AS titulo,
                     MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END) AS data_inicio,
                     MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END) AS data_fim,
+                    MAX(CASE WHEN t.id_pergunta = 1653 THEN t.entidade END) AS cliente,
+                    MAX(CASE WHEN t.id_pergunta = 1654 THEN t.grupo END) AS area_atuacao,
                     MAX(CASE WHEN t.id_pergunta = 1654 THEN t.grupo_id END) AS area_atuacao_codigo,
+                    MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) AS tipo_atendimento,
                     CASE 
                         WHEN MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) = 'Comercial' THEN 1
                         WHEN MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) = 'Fora do Horario' THEN 2
@@ -149,21 +157,23 @@ class GLPISync {
                     END AS tipo_atendimento_codigo,
                     TIMESTAMPDIFF(SECOND, MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END), MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END)) AS segundos
                 FROM (
-                    SELECT fa.id AS resposta_id, fa.requester_id, it.tickets_id AS ticket_id, q.id AS id_pergunta, a.answer AS resposta, g.id AS grupo_id
+                    SELECT
+                        fa.id AS resposta_id, fa.requester_id, it.tickets_id AS ticket_id, q.id AS id_pergunta, a.answer AS resposta,
+                        e.name AS entidade, g.name AS grupo, g.id AS grupo_id
                     FROM glpi_plugin_formcreator_formanswers fa
                     JOIN glpi_plugin_formcreator_answers a ON a.plugin_formcreator_formanswers_id = fa.id
                     JOIN glpi_plugin_formcreator_questions q ON q.id = a.plugin_formcreator_questions_id
                     LEFT JOIN glpi_items_tickets it ON it.items_id = fa.id AND it.itemtype = 'PluginFormcreatorFormAnswer'
+                    LEFT JOIN glpi_entities e ON q.id = 1653 AND e.id = a.answer
                     LEFT JOIN glpi_groups g ON q.id = 1654 AND g.id = a.answer
-                    WHERE fa.plugin_formcreator_forms_id = 142 AND q.id IN (1643,1651,1652,1654,1655)
+                    WHERE fa.plugin_formcreator_forms_id = 142 AND q.id IN (1643,1651,1652,1653,1654,1655)
                 ) t
                 LEFT JOIN glpi_users u ON u.id = t.requester_id
-                JOIN glpi_tickets gt ON gt.id = t.ticket_id
+                LEFT JOIN glpi_tickets tk ON tk.id = t.ticket_id
                 WHERE t.ticket_id IS NOT NULL
-                AND gt.status < 5 
                 $filterSql
                 AND NOT EXISTS (SELECT 1 FROM glpi_tickettasks tt WHERE tt.tickets_id = t.ticket_id)
-                GROUP BY t.resposta_id, t.ticket_id, u.id
+                GROUP BY t.resposta_id, t.ticket_id, tk.date_mod, tk.solvedate, tk.closedate, u.id, u.name
                 ORDER BY t.resposta_id";
 
             $stmt = $this->db->prepare($sql);
@@ -172,49 +182,64 @@ class GLPISync {
             $pendentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
             if (count($pendentes) === 0) {
-                $this->log('Info', "Nenhum dado pendente para processar" . ($targetTicketId ? " (Ticket #$targetTicketId)" : ""));
+                $this->log('Info', "Nenhum dado pendente para processar");
             }
 
-            foreach ($pendentes as $task) {
+            foreach ($pendentes as $row) {
+                $ticketId = (int)$row['ticket_id'];
+                $this->log('Info', "Processando Ticket #$ticketId");
+
+                // 1. Reabrir o Chamado (status 2)
+                $resReopen = $this->callAPI("Ticket/$ticketId", 'PUT', ['id' => $ticketId, 'status' => 2]);
+                if ($resReopen['code'] != 200) {
+                    $this->log('Erro', "Falha ao reabrir Ticket #$ticketId", ['response' => $resReopen['data']]);
+                    continue;
+                }
+                $this->log('Sucesso', "Ticket #$ticketId reaberto para inserção de tarefa");
+
+                // 2. Inserir a Tarefa
                 $payloadTask = [
-                    'tickets_id' => (int)$task['ticket_id'],
-                    'content' => $task['titulo'],
-                    'actiontime' => (int)$task['segundos'],
-                    'begin' => $task['data_inicio'],
-                    'end' => $task['data_fim'],
+                    'tickets_id' => $ticketId,
+                    'content' => $row['titulo'],
+                    'actiontime' => (int)$row['segundos'],
+                    'begin' => $row['data_inicio'],
+                    'end' => $row['data_fim'],
                     'is_private' => 1,
                     'state' => 2,
-                    'users_id' => (int)$task['requisitante_id'],
-                    'users_id_tech' => (int)$task['requisitante_id']
+                    'users_id' => (int)$row['requisitante_id'],
+                    'users_id_tech' => (int)$row['requisitante_id'],
+                    'taskcategories_id' => (int)$row['tipo_atendimento_codigo']
                 ];
 
-                if ((int)$task['tipo_atendimento_codigo'] > 0) {
-                    $payloadTask['taskcategories_id'] = (int)$task['tipo_atendimento_codigo'];
+                if ((int)$row['area_atuacao_codigo'] > 0) {
+                    $payloadTask['groups_id_tech'] = (int)$row['area_atuacao_codigo'];
                 }
-
-                if ((int)$task['area_atuacao_codigo'] > 0) {
-                    $payloadTask['groups_id_tech'] = (int)$task['area_atuacao_codigo'];
-                }
-
-                $this->log('Debug', "Payload enviado para TicketTask (Ticket #{$task['ticket_id']})", $payloadTask);
 
                 $resTask = $this->callAPI('TicketTask', 'POST', $payloadTask);
 
                 if ($resTask['code'] == 201) {
-                    $this->log('Sucesso', "Tarefa inserida no Ticket #{$task['ticket_id']}");
+                    $this->log('Sucesso', "Tarefa inserida no Ticket #$ticketId");
                     
-                    $payloadTicket = [
-                        'id' => (int)$task['ticket_id'],
-                        'status' => 6 
+                    // 3. Fechar novamente e restaurar datas
+                    $payloadFinal = [
+                        'id' => $ticketId,
+                        'status' => 6,
+                        'date_mod' => $row['data_modificacao'],
+                        'solvedate' => $row['data_solucao'],
+                        'closedate' => $row['data_fechamento']
                     ];
                     
-                    $resTicket = $this->callAPI('Ticket/' . $task['ticket_id'], 'PUT', $payloadTicket);
+                    $resFinal = $this->callAPI("Ticket/$ticketId", 'PUT', $payloadFinal);
                     
-                    if ($resTicket['code'] == 200) {
-                        $this->log('Sucesso', "Ticket #{$task['ticket_id']} marcado como Fechado");
+                    if ($resFinal['code'] == 200) {
+                        $this->log('Sucesso', "Ticket #$ticketId fechado e datas restauradas");
+                    } else {
+                        $this->log('Erro', "Falha ao fechar Ticket #$ticketId", ['response' => $resFinal['data']]);
                     }
                 } else {
-                    $this->log('Erro', "Falha na tarefa do Ticket #{$task['ticket_id']}", ['response' => $resTask['data']]);
+                    $this->log('Erro', "Falha na tarefa do Ticket #$ticketId", ['response' => $resTask['data']]);
+                    // Tentar fechar mesmo se a tarefa falhar
+                    $this->callAPI("Ticket/$ticketId", 'PUT', ['id' => $ticketId, 'status' => 6]);
                 }
             }
 
