@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.2.0
+ * Versão: 1.3.0
  */
 
 class EnvLoader {
@@ -119,6 +119,11 @@ class GLPISync {
                     MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END) AS data_fim,
                     MAX(CASE WHEN t.id_pergunta = 1654 THEN t.grupo_id END) AS area_atuacao_codigo,
                     MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) AS tipo_atendimento,
+                    CASE 
+                        WHEN MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) = 'Comercial' THEN 1
+                        WHEN MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) = 'Plantão' THEN 2
+                        ELSE 0
+                    END AS tipo_atendimento_codigo,
                     TIMESTAMPDIFF(SECOND, MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END), MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END)) AS segundos
                 FROM (
                     SELECT fa.id AS resposta_id, fa.requester_id, it.tickets_id AS ticket_id, q.id AS id_pergunta, a.answer AS resposta, g.id AS grupo_id
@@ -127,7 +132,7 @@ class GLPISync {
                     JOIN glpi_plugin_formcreator_questions q ON q.id = a.plugin_formcreator_questions_id
                     LEFT JOIN glpi_items_tickets it ON it.items_id = fa.id AND it.itemtype = 'PluginFormcreatorFormAnswer'
                     LEFT JOIN glpi_groups g ON q.id = 1654 AND g.id = a.answer
-                    WHERE fa.plugin_formcreator_forms_id = 142 AND q.id IN (1643,1651,1652,1653,1654,1655)
+                    WHERE fa.plugin_formcreator_forms_id = 142 AND q.id IN (1643,1651,1652,1654,1655)
                 ) t
                 LEFT JOIN glpi_users u ON u.id = t.requester_id
                 WHERE t.ticket_id IS NOT NULL
@@ -149,6 +154,8 @@ class GLPISync {
                     'end' => $task['data_fim'],
                     'users_id' => $task['requisitante_id'],
                     'groups_id_tech' => $task['area_atuacao_codigo'],
+                    'taskcategories_id' => (int)$task['tipo_atendimento_codigo'],
+                    'is_private' => 1,
                     'state' => 2 // Planejado/Feito
                 ];
 
