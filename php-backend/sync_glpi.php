@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.6.0
+ * Versão: 1.6.1
  */
 
 class EnvLoader {
@@ -137,19 +137,16 @@ class GLPISync {
             
             $sql = "
                 SELECT
-                    t.resposta_id, t.ticket_id,
+                    t.ticket_id,
+                    tk.status AS ticket_status,
                     tk.date_mod AS data_modificacao,
                     tk.solvedate AS data_solucao,
                     tk.closedate AS data_fechamento,
                     u.id AS requisitante_id,
-                    u.name AS requisitante,
                     MAX(CASE WHEN t.id_pergunta = 1643 THEN t.resposta END) AS titulo,
                     MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END) AS data_inicio,
                     MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END) AS data_fim,
-                    MAX(CASE WHEN t.id_pergunta = 1653 THEN t.entidade END) AS cliente,
-                    MAX(CASE WHEN t.id_pergunta = 1654 THEN t.grupo END) AS area_atuacao,
                     MAX(CASE WHEN t.id_pergunta = 1654 THEN t.grupo_id END) AS area_atuacao_codigo,
-                    MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) AS tipo_atendimento,
                     CASE 
                         WHEN MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) = 'Comercial' THEN 1
                         WHEN MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) = 'Fora do Horario' THEN 2
@@ -158,23 +155,21 @@ class GLPISync {
                     TIMESTAMPDIFF(SECOND, MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END), MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END)) AS segundos
                 FROM (
                     SELECT
-                        fa.id AS resposta_id, fa.requester_id, it.tickets_id AS ticket_id, q.id AS id_pergunta, a.answer AS resposta,
-                        e.name AS entidade, g.name AS grupo, g.id AS grupo_id
+                        fa.requester_id, it.tickets_id AS ticket_id, q.id AS id_pergunta, a.answer AS resposta, g.id AS grupo_id
                     FROM glpi_plugin_formcreator_formanswers fa
                     JOIN glpi_plugin_formcreator_answers a ON a.plugin_formcreator_formanswers_id = fa.id
                     JOIN glpi_plugin_formcreator_questions q ON q.id = a.plugin_formcreator_questions_id
                     LEFT JOIN glpi_items_tickets it ON it.items_id = fa.id AND it.itemtype = 'PluginFormcreatorFormAnswer'
-                    LEFT JOIN glpi_entities e ON q.id = 1653 AND e.id = a.answer
                     LEFT JOIN glpi_groups g ON q.id = 1654 AND g.id = a.answer
-                    WHERE fa.plugin_formcreator_forms_id = 142 AND q.id IN (1643,1651,1652,1653,1654,1655)
+                    WHERE fa.plugin_formcreator_forms_id = 142 AND q.id IN (1643,1651,1652,1654,1655)
                 ) t
                 LEFT JOIN glpi_users u ON u.id = t.requester_id
                 LEFT JOIN glpi_tickets tk ON tk.id = t.ticket_id
                 WHERE t.ticket_id IS NOT NULL
                 $filterSql
                 AND NOT EXISTS (SELECT 1 FROM glpi_tickettasks tt WHERE tt.tickets_id = t.ticket_id)
-                GROUP BY t.resposta_id, t.ticket_id, tk.date_mod, tk.solvedate, tk.closedate, u.id, u.name
-                ORDER BY t.resposta_id";
+                GROUP BY t.ticket_id, tk.status, tk.date_mod, tk.solvedate, tk.closedate, u.id
+                ORDER BY t.ticket_id";
 
             $stmt = $this->db->prepare($sql);
             if ($targetTicketId) $stmt->bindParam(':ticket_id', $targetTicketId, PDO::PARAM_INT);
@@ -187,15 +182,19 @@ class GLPISync {
 
             foreach ($pendentes as $row) {
                 $ticketId = (int)$row['ticket_id'];
-                $this->log('Info', "Processando Ticket #$ticketId");
+                $isClosed = ((int)$row['ticket_status'] === 6);
+                
+                $this->log('Info', "Ticket #$ticketId - Status Atual: " . $row['ticket_status']);
 
-                // 1. Reabrir o Chamado (status 2)
-                $resReopen = $this->callAPI("Ticket/$ticketId", 'PUT', ['id' => $ticketId, 'status' => 2]);
-                if ($resReopen['code'] != 200) {
-                    $this->log('Erro', "Falha ao reabrir Ticket #$ticketId", ['response' => $resReopen['data']]);
-                    continue;
+                // 1. Reabrir apenas se estiver fechado (status 6)
+                if ($isClosed) {
+                    $resReopen = $this->callAPI("Ticket/$ticketId", 'PUT', ['id' => $ticketId, 'status' => 2]);
+                    if ($resReopen['code'] != 200) {
+                        $this->log('Erro', "Falha ao reabrir Ticket #$ticketId", ['response' => $resReopen['data']]);
+                        continue;
+                    }
+                    $this->log('Sucesso', "Ticket #$ticketId reaberto temporariamente");
                 }
-                $this->log('Sucesso', "Ticket #$ticketId reaberto para inserção de tarefa");
 
                 // 2. Inserir a Tarefa
                 $payloadTask = [
@@ -220,26 +219,25 @@ class GLPISync {
                 if ($resTask['code'] == 201) {
                     $this->log('Sucesso', "Tarefa inserida no Ticket #$ticketId");
                     
-                    // 3. Fechar novamente e restaurar datas
-                    $payloadFinal = [
-                        'id' => $ticketId,
-                        'status' => 6,
-                        'date_mod' => $row['data_modificacao'],
-                        'solvedate' => $row['data_solucao'],
-                        'closedate' => $row['data_fechamento']
-                    ];
+                    // 3. Finalizar Chamado
+                    $payloadFinal = ['id' => $ticketId, 'status' => 6];
+                    
+                    // Se estava fechado, restauramos as datas originais
+                    if ($isClosed) {
+                        $payloadFinal['date_mod'] = $row['data_modificacao'];
+                        $payloadFinal['solvedate'] = $row['data_solucao'];
+                        $payloadFinal['closedate'] = $row['data_fechamento'];
+                    }
                     
                     $resFinal = $this->callAPI("Ticket/$ticketId", 'PUT', $payloadFinal);
                     
                     if ($resFinal['code'] == 200) {
-                        $this->log('Sucesso', "Ticket #$ticketId fechado e datas restauradas");
-                    } else {
-                        $this->log('Erro', "Falha ao fechar Ticket #$ticketId", ['response' => $resFinal['data']]);
+                        $this->log('Sucesso', "Ticket #$ticketId finalizado" . ($isClosed ? " com datas restauradas" : ""));
                     }
                 } else {
                     $this->log('Erro', "Falha na tarefa do Ticket #$ticketId", ['response' => $resTask['data']]);
-                    // Tentar fechar mesmo se a tarefa falhar
-                    $this->callAPI("Ticket/$ticketId", 'PUT', ['id' => $ticketId, 'status' => 6]);
+                    // Tentar voltar para o status original se houver erro
+                    if ($isClosed) $this->callAPI("Ticket/$ticketId", 'PUT', ['id' => $ticketId, 'status' => 6]);
                 }
             }
 
