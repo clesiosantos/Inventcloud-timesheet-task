@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.4.0
+ * Versão: 1.4.1
  */
 
 class EnvLoader {
@@ -60,7 +60,14 @@ class GLPISync {
         $currentLogs = file_exists($this->logFile) ? json_decode(file_get_contents($this->logFile), true) : [];
         $currentLogs[] = $logEntry;
         file_put_contents($this->logFile, json_encode($currentLogs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-        echo "[$status] " . date('H:i:s') . " - $message\n";
+        
+        // Saída visual para o terminal
+        $color = ($status === 'Erro') ? "\033[31m" : (($status === 'Sucesso') ? "\033[32m" : "\033[36m");
+        $reset = "\033[0m";
+        echo "{$color}[$status]{$reset} " . date('H:i:s') . " - $message\n";
+        if (!empty($extra) && $status === 'Erro') {
+            echo "         Detalhamento: " . json_encode($extra, JSON_UNESCAPED_UNICODE) . "\n";
+        }
     }
 
     private function callAPI($endpoint, $method = 'GET', $params = []) {
@@ -155,13 +162,13 @@ class GLPISync {
 
             foreach ($pendentes as $task) {
                 $payload = [
-                    'tickets_id' => $task['ticket_id'],
+                    'tickets_id' => (int)$task['ticket_id'],
                     'content' => "[" . $task['tipo_atendimento'] . "] " . $task['titulo'],
                     'actiontime' => (int)$task['segundos'],
                     'begin' => $task['data_inicio'],
                     'end' => $task['data_fim'],
-                    'users_id' => $task['requisitante_id'],
-                    'groups_id_tech' => $task['area_atuacao_codigo'],
+                    'users_id' => (int)$task['requisitante_id'],
+                    'groups_id_tech' => (int)$task['area_atuacao_codigo'],
                     'taskcategories_id' => (int)$task['tipo_atendimento_codigo'],
                     'is_private' => 1,
                     'state' => 2 // Planejado/Feito
@@ -172,7 +179,7 @@ class GLPISync {
                 if ($res['code'] == 201) {
                     $this->log('Sucesso', "Tarefa inserida no Ticket #{$task['ticket_id']}", ['id' => $res['data']['id']]);
                 } else {
-                    $this->log('Erro', "Falha ao inserir tarefa no Ticket #{$task['ticket_id']}", ['response' => $res['data']]);
+                    $this->log('Erro', "Falha ao inserir tarefa no Ticket #{$task['ticket_id']}", ['response' => $res['data'], 'payload_enviado' => $payload]);
                 }
             }
 
@@ -186,6 +193,5 @@ class GLPISync {
 }
 
 $sync = new GLPISync();
-// Pega o ticket_id se passado como argumento: php sync_glpi.php 1234
 $ticketArg = isset($argv[1]) ? (int)$argv[1] : null;
 $sync->run($ticketArg);
