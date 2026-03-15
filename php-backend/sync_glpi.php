@@ -2,37 +2,56 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas
  * Autor: Dyad AI
- * Versão: 1.0.0
- * 
- * Este script deve ser configurado na cron:
- * *\/10 * * * * php /caminho/para/sync_glpi.php
+ * Versão: 1.1.0
  */
 
-// Configurações de Banco de Dados GLPI
-define('DB_HOST', 'localhost');
-define('DB_NAME', 'glpi_database');
-define('DB_USER', 'usuario_glpi');
-define('DB_PASS', 'senha_segura');
+class EnvLoader {
+    public static function load($path) {
+        if (!file_exists($path)) {
+            return false;
+        }
 
-// Configurações API GLPI 10
-define('GLPI_URL', 'https://seu-glpi.com/apirest.php');
-define('APP_TOKEN', 'seu_app_token');
-define('USER_TOKEN', 'seu_user_token');
+        $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        foreach ($lines as $line) {
+            if (strpos(trim($line), '#') === 0) continue;
+            
+            list($name, $value) = explode('=', $line, 2);
+            $name = trim($name);
+            $value = trim($value);
 
-// Configuração de Log
-define('LOG_FILE', __DIR__ . '/logs/sync_' . date('Y-m-d') . '.json');
+            if (!array_key_exists($name, $_SERVER) && !array_key_exists($name, $_ENV)) {
+                putenv(sprintf('%s=%s', $name, $value));
+                $_ENV[$name] = $value;
+                $_SERVER[$name] = $value;
+            }
+        }
+        return true;
+    }
+}
+
+// Tenta carregar o .env do diretório atual ou da raiz
+if (!EnvLoader::load(__DIR__ . '/.env')) {
+    EnvLoader::load(__DIR__ . '/../.env');
+}
 
 class GLPISync {
     private $db;
     private $sessionToken;
+    private $logFile;
 
     public function __construct() {
+        $this->logFile = __DIR__ . '/logs/sync_' . date('Y-m-d') . '.json';
         $this->initDatabase();
     }
 
     private function initDatabase() {
         try {
-            $this->db = new PDO("mysql:host=" . DB_HOST . ";dbname=" . DB_NAME . ";charset=utf8", DB_USER, DB_PASS);
+            $host = getenv('DB_HOST');
+            $name = getenv('DB_NAME');
+            $user = getenv('DB_USER');
+            $pass = getenv('DB_PASS');
+
+            $this->db = new PDO("mysql:host=$host;dbname=$name;charset=utf8", $user, $pass);
             $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         } catch (PDOException $e) {
             $this->log('Erro', 'Conexão DB falhou: ' . $e->getMessage());
@@ -48,25 +67,25 @@ class GLPISync {
             'extra' => $extra
         ];
 
-        // Cria diretório de logs se não existir
         if (!is_dir(__DIR__ . '/logs')) {
             mkdir(__DIR__ . '/logs', 0755, true);
         }
 
-        $currentLogs = file_exists(LOG_FILE) ? json_decode(file_get_contents(LOG_FILE), true) : [];
+        $currentLogs = file_exists($this->logFile) ? json_decode(file_get_contents($this->logFile), true) : [];
         $currentLogs[] = $logEntry;
-        file_put_contents(LOG_FILE, json_encode($currentLogs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        file_put_contents($this->logFile, json_encode($currentLogs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
         
-        echo "[$status] $message\n";
+        echo "[$status] " . date('H:i:s') . " - $message\n";
     }
 
     private function getSessionToken() {
-        $ch = curl_init(GLPI_URL . '/initSession');
+        $url = getenv('GLPI_URL') . '/initSession';
+        $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             'Content-Type: application/json',
-            'App-Token: ' . APP_TOKEN,
-            'Authorization: user_token ' . USER_TOKEN
+            'App-Token: ' . getenv('APP_TOKEN'),
+            'Authorization: user_token ' . getenv('USER_TOKEN')
         ]);
         
         $response = curl_exec($ch);
@@ -77,7 +96,7 @@ class GLPISync {
             return $data['session_token'];
         }
 
-        $this->log('Erro', 'Falha ao iniciar sessão na API do GLPI');
+        $this->log('Erro', 'Falha ao iniciar sessão na API do GLPI. Verifique as credenciais no .env');
         return false;
     }
 
@@ -85,26 +104,16 @@ class GLPISync {
         $startTime = microtime(true);
         $this->log('Info', 'Iniciando processamento da cron');
 
-        // 1. Inicia Sessão
         $this->sessionToken = $this->getSessionToken();
         if (!$this->sessionToken) return;
 
-        // 2. Consulta Dados (Aqui entra a query que você vai me passar)
-        // Exemplo genérico:
-        /*
-        $query = "SUA_CONSULTA_AQUI";
-        $stmt = $this->db->query($query);
-        $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        */
+        // AGUARDANDO SUA CONSULTA SQL E LÓGICA DE INSERÇÃO
+        $this->log('Aviso', 'Aguardando consulta SQL do usuário para prosseguir com a sincronização');
 
-        $this->log('Info', 'Aguardando consulta SQL para processamento...');
-
-        // 3. Finaliza Cron
         $duration = round(microtime(true) - $startTime, 2);
-        $this->log('Sucesso', 'Sincronização finalizada', ['duration' => $duration . 's']);
+        $this->log('Sucesso', 'Execução finalizada', ['duration' => $duration . 's']);
     }
 }
 
-// Execução
 $sync = new GLPISync();
 $sync->run();

@@ -12,6 +12,17 @@ dist
 dist-ssr
 *.local
 
+# Variáveis de Ambiente
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# PHP Backend specific
+php-backend/logs/
+php-backend/.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
