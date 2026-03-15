@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.5.0
+ * Versão: 1.5.1
  */
 
 class EnvLoader {
@@ -173,16 +173,16 @@ class GLPISync {
                 if ($resTask['code'] == 201) {
                     $this->log('Sucesso', "Tarefa inserida no Ticket #{$task['ticket_id']}");
                     
-                    // 2. Solucionar/Fechar Chamado
+                    // 2. Fechar Chamado (Status 6)
                     $payloadTicket = [
                         'id' => (int)$task['ticket_id'],
-                        'status' => 5 // 5 = Solucionado, 6 = Fechado
+                        'status' => 6 // 6 = Fechado
                     ];
                     
                     $resTicket = $this->callAPI('Ticket/' . $task['ticket_id'], 'PUT', $payloadTicket);
                     
                     if ($resTicket['code'] == 200) {
-                        $this->log('Sucesso', "Ticket #{$task['ticket_id']} marcado como Solucionado");
+                        $this->log('Sucesso', "Ticket #{$task['ticket_id']} marcado como Fechado");
                     } else {
                         $this->log('Erro', "Falha ao fechar Ticket #{$task['ticket_id']}", ['response' => $resTicket['data']]);
                     }
