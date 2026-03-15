@@ -45,23 +45,24 @@ USER_TOKEN=seu_user_token_usuario_aqui
 ## 4. O Script de Sincronização (`sync_glpi.php`)
 
 O script realiza as seguintes operações:
-1. **Pivot de Dados**: Transforma as linhas de respostas do Formcreator em colunas legíveis (Título, Datas, Grupo, etc).
+1. **Pivot de Dados**: Transforma as linhas de respostas do Formcreator em colunas legíveis.
 2. **Deduplicação**: Verifica se o Chamado já possui tarefas antes de tentar inserir uma nova.
 3. **Conversão de Unidades**: Calcula a duração em segundos (exigido pela API).
-4. **Mapeamento de Status**: Define a tarefa como "Privada" e status "Feito".
+4. **Finalização Automática**: Após inserir a tarefa, o chamado é movido para o status **6 (Fechado)**.
 
 ### Mapeamento de Campos (SQL ➔ API)
 
 | Campo SQL | Campo API GLPI | Observação |
 | :--- | :--- | :--- |
 | `ticket_id` | `tickets_id` | ID do Chamado |
-| `titulo` | `content` | Prefixo: `[Tipo Atendimento]` |
-| `segundos` | `actiontime` | Tempo de ação nativo |
+| `titulo` | `content` | Resposta da pergunta 1643 |
+| `segundos` | `actiontime` | Tempo de ação em segundos |
 | `data_inicio` | `begin` | Formato Y-m-d H:i:s |
 | `data_fim` | `end` | Formato Y-m-d H:i:s |
-| `requisitante_id` | `users_id` | Técnico autor |
-| `area_atuacao_codigo`| `groups_id_tech` | Grupo responsável |
-| `tipo_atend_cod` | `taskcategories_id` | 1=Comercial, 2=Plantão |
+| `requisitante_id` | `users_id` | Autor (Técnico requisitante) |
+| `requisitante_id` | `users_id_tech` | Técnico da tarefa |
+| `area_atuacao_codigo`| `groups_id_tech` | Grupo responsável (Pergunta 1654) |
+| `tipo_atend_cod` | `taskcategories_id` | Categoria da tarefa (Pergunta 1655) |
 | Fixo: 1 | `is_private` | Tarefa Privada |
 | Fixo: 2 | `state` | Estado "Feito" |
 
@@ -78,18 +79,7 @@ Para que o sistema rode sozinho, adicione uma entrada no Crontab do seu servidor
 
 ---
 
-## 6. Painel de Monitoramento (Frontend)
-
-O frontend em React fornece:
-- **Status do Backend**: Verifica se o script PHP e o DB estão acessíveis.
-- **Métricas**: Taxa de sucesso/erro das últimas 24h.
-- **Logs Detalhados**: Visualização clara das inserções realizadas, mensagens de erro da API e tempos de execução.
-
----
-
-## 7. Logs de Execução
+## 6. Logs de Execução
 
 Os logs são armazenados em formato JSON em:
 `php-backend/logs/sync_YYYY-MM-DD.json`
-
-Isso permite que o Frontend leia as execuções sem a necessidade de uma tabela de log dedicada no banco de dados.
