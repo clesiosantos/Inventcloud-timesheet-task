@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.5.4
+ * Versão: 1.5.5
  */
 
 class EnvLoader {
@@ -37,7 +37,6 @@ class GLPISync {
     }
 
     private function getEnvVar($name) {
-        // Tenta pegar com underscore e com hífen para garantir compatibilidade
         $val = getenv($name);
         if (!$val) $val = getenv(str_replace('_', '-', $name));
         return $val;
@@ -112,13 +111,7 @@ class GLPISync {
         
         $responseRaw = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
         curl_close($ch);
-
-        if ($error) {
-            $this->log('Erro', "Falha na conexão cURL: $error");
-            return false;
-        }
 
         $response = json_decode($responseRaw, true);
 
@@ -137,9 +130,7 @@ class GLPISync {
         $this->log('Info', "Iniciando processamento");
 
         $this->sessionToken = $this->initSession();
-        if (!$this->sessionToken) {
-            return; // O erro já foi logado no initSession
-        }
+        if (!$this->sessionToken) return;
 
         try {
             $filterSql = $targetTicketId ? "AND t.ticket_id = :ticket_id" : "";
@@ -193,6 +184,9 @@ class GLPISync {
                     'users_id_tech' => (int)$task['requisitante_id']
                 ];
 
+                // DEBUG: Logar o valor bruto da categoria vindo do SQL
+                $this->log('Debug', "Ticket #{$task['ticket_id']} - Valor Categoria (1655): " . ($task['tipo_atend_cod'] ?? 'NULL'));
+
                 if ((int)$task['tipo_atend_cod'] > 0) {
                     $payloadTask['taskcategories_id'] = (int)$task['tipo_atend_cod'];
                 }
@@ -200,6 +194,9 @@ class GLPISync {
                 if ((int)$task['area_atuacao_codigo'] > 0) {
                     $payloadTask['groups_id_tech'] = (int)$task['area_atuacao_codigo'];
                 }
+
+                // Logar payload final para conferência
+                $this->log('Debug', "Payload enviado para TicketTask", $payloadTask);
 
                 $resTask = $this->callAPI('TicketTask', 'POST', $payloadTask);
 
@@ -215,8 +212,6 @@ class GLPISync {
                     
                     if ($resTicket['code'] == 200) {
                         $this->log('Sucesso', "Ticket #{$task['ticket_id']} marcado como Fechado");
-                    } else {
-                        $this->log('Erro', "Falha ao fechar Ticket #{$task['ticket_id']}", ['response' => $resTicket['data']]);
                     }
                 } else {
                     $this->log('Erro', "Falha na tarefa do Ticket #{$task['ticket_id']}", ['response' => $resTask['data']]);
