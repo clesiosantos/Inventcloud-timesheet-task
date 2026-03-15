@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.4.1
+ * Versão: 1.4.2
  */
 
 class EnvLoader {
@@ -61,7 +61,6 @@ class GLPISync {
         $currentLogs[] = $logEntry;
         file_put_contents($this->logFile, json_encode($currentLogs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
         
-        // Saída visual para o terminal
         $color = ($status === 'Erro') ? "\033[31m" : (($status === 'Sucesso') ? "\033[32m" : "\033[36m");
         $reset = "\033[0m";
         echo "{$color}[$status]{$reset} " . date('H:i:s') . " - $message\n";
@@ -102,19 +101,19 @@ class GLPISync {
             'App-Token: ' . getenv('APP_TOKEN'),
             'Authorization: user_token ' . getenv('USER_TOKEN')
         ]);
-        $response = json_decode(curl_exec($ch), true);
+        $responseRaw = curl_exec($ch);
+        $response = json_decode($responseRaw, true);
         curl_close($ch);
         return $response['session_token'] ?? false;
     }
 
     public function run($targetTicketId = null) {
         $startTime = microtime(true);
-        $msgInicio = $targetTicketId ? "Iniciando teste para Ticket #$targetTicketId" : "Iniciando processamento da cron";
-        $this->log('Info', $msgInicio);
+        $this->log('Info', $targetTicketId ? "Iniciando teste para Ticket #$targetTicketId" : "Iniciando processamento");
 
         $this->sessionToken = $this->initSession();
         if (!$this->sessionToken) {
-            $this->log('Erro', 'Falha na autenticação da API');
+            $this->log('Erro', 'Falha na autenticação da API (Verifique App-Token e User-Token)');
             return;
         }
 
@@ -161,30 +160,42 @@ class GLPISync {
             $this->log('Info', count($pendentes) . ' tarefas pendentes encontradas');
 
             foreach ($pendentes as $task) {
+                $prefix = $task['tipo_atendimento'] ? "[{$task['tipo_atendimento']}] " : "";
+                
                 $payload = [
                     'tickets_id' => (int)$task['ticket_id'],
-                    'content' => "[" . $task['tipo_atendimento'] . "] " . $task['titulo'],
+                    'content' => $prefix . $task['titulo'],
                     'actiontime' => (int)$task['segundos'],
                     'begin' => $task['data_inicio'],
                     'end' => $task['data_fim'],
-                    'users_id' => (int)$task['requisitante_id'],
-                    'groups_id_tech' => (int)$task['area_atuacao_codigo'],
-                    'taskcategories_id' => (int)$task['tipo_atendimento_codigo'],
                     'is_private' => 1,
-                    'state' => 2 // Planejado/Feito
+                    'state' => 2
                 ];
+
+                // Só adiciona IDs se forem maiores que zero
+                if ((int)$task['area_atuacao_codigo'] > 0) {
+                    $payload['groups_id_tech'] = (int)$task['area_atuacao_codigo'];
+                }
+                
+                if ((int)$task['tipo_atendimento_codigo'] > 0) {
+                    $payload['taskcategories_id'] = (int)$task['tipo_atendimento_codigo'];
+                }
 
                 $res = $this->callAPI('TicketTask', 'POST', $payload);
 
                 if ($res['code'] == 201) {
                     $this->log('Sucesso', "Tarefa inserida no Ticket #{$task['ticket_id']}", ['id' => $res['data']['id']]);
                 } else {
-                    $this->log('Erro', "Falha ao inserir tarefa no Ticket #{$task['ticket_id']}", ['response' => $res['data'], 'payload_enviado' => $payload]);
+                    $this->log('Erro', "Falha ao inserir tarefa no Ticket #{$task['ticket_id']}", [
+                        'http_code' => $res['code'],
+                        'response' => $res['data'], 
+                        'payload' => $payload
+                    ]);
                 }
             }
 
         } catch (Exception $e) {
-            $this->log('Erro', 'Exceção durante o processamento: ' . $e->getMessage());
+            $this->log('Erro', 'Exceção: ' . $e->getMessage());
         }
 
         $duration = round(microtime(true) - $startTime, 2);
