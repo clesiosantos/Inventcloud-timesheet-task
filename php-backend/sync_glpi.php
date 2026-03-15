@@ -1,26 +1,20 @@
 <?php
 /**
- * Integração GLPI 10 - Sincronização de Tarefas
+ * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.1.0
+ * Versão: 1.2.0
  */
 
 class EnvLoader {
     public static function load($path) {
-        if (!file_exists($path)) {
-            return false;
-        }
-
+        if (!file_exists($path)) return false;
         $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         foreach ($lines as $line) {
             if (strpos(trim($line), '#') === 0) continue;
-            
             list($name, $value) = explode('=', $line, 2);
-            $name = trim($name);
-            $value = trim($value);
-
-            if (!array_key_exists($name, $_SERVER) && !array_key_exists($name, $_ENV)) {
-                putenv(sprintf('%s=%s', $name, $value));
+            $name = trim($name); $value = trim($value);
+            if (!array_key_exists($name, $_SERVER)) {
+                putenv("$name=$value");
                 $_ENV[$name] = $value;
                 $_SERVER[$name] = $value;
             }
@@ -29,10 +23,7 @@ class EnvLoader {
     }
 }
 
-// Tenta carregar o .env do diretório atual ou da raiz
-if (!EnvLoader::load(__DIR__ . '/.env')) {
-    EnvLoader::load(__DIR__ . '/../.env');
-}
+EnvLoader::load(__DIR__ . '/.env') || EnvLoader::load(__DIR__ . '/../.env');
 
 class GLPISync {
     private $db;
@@ -46,12 +37,11 @@ class GLPISync {
 
     private function initDatabase() {
         try {
-            $host = getenv('DB_HOST');
-            $name = getenv('DB_NAME');
-            $user = getenv('DB_USER');
-            $pass = getenv('DB_PASS');
-
-            $this->db = new PDO("mysql:host=$host;dbname=$name;charset=utf8", $user, $pass);
+            $this->db = new PDO(
+                "mysql:host=".getenv('DB_HOST').";dbname=".getenv('DB_NAME').";charset=utf8",
+                getenv('DB_USER'),
+                getenv('DB_PASS')
+            );
             $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         } catch (PDOException $e) {
             $this->log('Erro', 'Conexão DB falhou: ' . $e->getMessage());
@@ -66,19 +56,37 @@ class GLPISync {
             'message' => $message,
             'extra' => $extra
         ];
-
-        if (!is_dir(__DIR__ . '/logs')) {
-            mkdir(__DIR__ . '/logs', 0755, true);
-        }
-
+        if (!is_dir(__DIR__ . '/logs')) mkdir(__DIR__ . '/logs', 0755, true);
         $currentLogs = file_exists($this->logFile) ? json_decode(file_get_contents($this->logFile), true) : [];
         $currentLogs[] = $logEntry;
         file_put_contents($this->logFile, json_encode($currentLogs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-        
         echo "[$status] " . date('H:i:s') . " - $message\n";
     }
 
-    private function getSessionToken() {
+    private function callAPI($endpoint, $method = 'GET', $params = []) {
+        $url = getenv('GLPI_URL') . '/' . $endpoint;
+        $ch = curl_init($url);
+        $headers = [
+            'Content-Type: application/json',
+            'App-Token: ' . getenv('APP_TOKEN'),
+            'Session-Token: ' . $this->sessionToken
+        ];
+
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+        if ($method === 'POST') {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['input' => $params]));
+        }
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        return ['code' => $httpCode, 'data' => json_decode($response, true)];
+    }
+
+    private function initSession() {
         $url = getenv('GLPI_URL') . '/initSession';
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -87,31 +95,78 @@ class GLPISync {
             'App-Token: ' . getenv('APP_TOKEN'),
             'Authorization: user_token ' . getenv('USER_TOKEN')
         ]);
-        
-        $response = curl_exec($ch);
-        $data = json_decode($response, true);
+        $response = json_decode(curl_exec($ch), true);
         curl_close($ch);
-
-        if (isset($data['session_token'])) {
-            return $data['session_token'];
-        }
-
-        $this->log('Erro', 'Falha ao iniciar sessão na API do GLPI. Verifique as credenciais no .env');
-        return false;
+        return $response['session_token'] ?? false;
     }
 
     public function run() {
         $startTime = microtime(true);
         $this->log('Info', 'Iniciando processamento da cron');
 
-        $this->sessionToken = $this->getSessionToken();
-        if (!$this->sessionToken) return;
+        $this->sessionToken = $this->initSession();
+        if (!$this->sessionToken) {
+            $this->log('Erro', 'Falha na autenticação da API');
+            return;
+        }
 
-        // AGUARDANDO SUA CONSULTA SQL E LÓGICA DE INSERÇÃO
-        $this->log('Aviso', 'Aguardando consulta SQL do usuário para prosseguir com a sincronização');
+        try {
+            $sql = "
+                SELECT
+                    t.resposta_id, t.ticket_id, u.id AS requisitante_id, u.name AS requisitante,
+                    MAX(CASE WHEN t.id_pergunta = 1643 THEN t.resposta END) AS titulo,
+                    MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END) AS data_inicio,
+                    MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END) AS data_fim,
+                    MAX(CASE WHEN t.id_pergunta = 1654 THEN t.grupo_id END) AS area_atuacao_codigo,
+                    MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) AS tipo_atendimento,
+                    TIMESTAMPDIFF(SECOND, MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END), MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END)) AS segundos
+                FROM (
+                    SELECT fa.id AS resposta_id, fa.requester_id, it.tickets_id AS ticket_id, q.id AS id_pergunta, a.answer AS resposta, g.id AS grupo_id
+                    FROM glpi_plugin_formcreator_formanswers fa
+                    JOIN glpi_plugin_formcreator_answers a ON a.plugin_formcreator_formanswers_id = fa.id
+                    JOIN glpi_plugin_formcreator_questions q ON q.id = a.plugin_formcreator_questions_id
+                    LEFT JOIN glpi_items_tickets it ON it.items_id = fa.id AND it.itemtype = 'PluginFormcreatorFormAnswer'
+                    LEFT JOIN glpi_groups g ON q.id = 1654 AND g.id = a.answer
+                    WHERE fa.plugin_formcreator_forms_id = 142 AND q.id IN (1643,1651,1652,1653,1654,1655)
+                ) t
+                LEFT JOIN glpi_users u ON u.id = t.requester_id
+                WHERE t.ticket_id IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM glpi_tickettasks tt WHERE tt.tickets_id = t.ticket_id)
+                GROUP BY t.resposta_id, t.ticket_id, u.id, u.name
+                ORDER BY t.resposta_id";
+
+            $stmt = $this->db->query($sql);
+            $pendentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            $this->log('Info', count($pendentes) . ' tarefas pendentes encontradas');
+
+            foreach ($pendentes as $task) {
+                $payload = [
+                    'tickets_id' => $task['ticket_id'],
+                    'content' => "[" . $task['tipo_atendimento'] . "] " . $task['titulo'],
+                    'actiontime' => (int)$task['segundos'],
+                    'begin' => $task['data_inicio'],
+                    'end' => $task['data_fim'],
+                    'users_id' => $task['requisitante_id'],
+                    'groups_id_tech' => $task['area_atuacao_codigo'],
+                    'state' => 2 // Planejado/Feito
+                ];
+
+                $res = $this->callAPI('TicketTask', 'POST', $payload);
+
+                if ($res['code'] == 201) {
+                    $this->log('Sucesso', "Tarefa inserida no Ticket #{$task['ticket_id']}", ['id' => $res['data']['id']]);
+                } else {
+                    $this->log('Erro', "Falha ao inserir tarefa no Ticket #{$task['ticket_id']}", ['response' => $res['data']]);
+                }
+            }
+
+        } catch (Exception $e) {
+            $this->log('Erro', 'Exceção durante o processamento: ' . $e->getMessage());
+        }
 
         $duration = round(microtime(true) - $startTime, 2);
-        $this->log('Sucesso', 'Execução finalizada', ['duration' => $duration . 's']);
+        $this->log('Fim', 'Execução encerrada', ['duration' => $duration . 's']);
     }
 }
 
