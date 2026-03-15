@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.5.1
+ * Versão: 1.5.2
  */
 
 class EnvLoader {
@@ -161,7 +161,8 @@ class GLPISync {
                     'end' => $task['data_fim'],
                     'is_private' => 1,
                     'state' => 2,
-                    'users_id_tech' => (int)$task['requisitante_id']
+                    'users_id' => (int)$task['requisitante_id'], // Autor da tarefa
+                    'users_id_tech' => (int)$task['requisitante_id'] // Técnico da tarefa
                 ];
 
                 if ((int)$task['area_atuacao_codigo'] > 0) {
