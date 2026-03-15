@@ -104,12 +104,15 @@ class GLPIFixer {
             AND EXISTS (SELECT 1 FROM glpi_tickettasks tt WHERE tt.tickets_id = tk.id)";
 
         $tickets = $this->db->query($sql)->fetchAll(PDO::FETCH_ASSOC);
-        echo "Encontrados " . count($tickets) . " tickets para corrigir.\n";
+        echo "Encontrados " . count($tickets) . " tickets para analisar.\n";
 
         foreach ($tickets as $row) {
             $id = $row['ticket_id'];
             $data = $row['data_abertura'];
 
+            echo "Tentando corrigir Ticket #$id para data $data...\n";
+            
+            // Tenta o update direto primeiro
             $res = $this->callAPI("Ticket/$id", 'PUT', [
                 'id' => $id,
                 'solvedate' => $data,
@@ -117,9 +120,26 @@ class GLPIFixer {
             ]);
 
             if ($res['code'] == 200) {
-                echo "[Sucesso] Ticket #$id atualizado para $data\n";
+                echo "[Sucesso] Ticket #$id atualizado diretamente.\n";
             } else {
-                echo "[Erro] Falha no Ticket #$id\n";
+                echo "[Info] Update direto falhou (HTTP {$res['code']}). Tentando via reabertura...\n";
+                
+                // Se falhar, tenta reabrir, atualizar e fechar
+                $this->callAPI("Ticket/$id", 'PUT', ['id' => $id, 'status' => 2]); // Reabre
+                
+                $resRetry = $this->callAPI("Ticket/$id", 'PUT', [
+                    'id' => $id,
+                    'status' => 6,
+                    'solvedate' => $data,
+                    'closedate' => $data
+                ]);
+
+                if ($resRetry['code'] == 200) {
+                    echo "[Sucesso] Ticket #$id corrigido via ciclo de status.\n";
+                } else {
+                    $error = is_array($resRetry['data']) ? json_encode($resRetry['data']) : $resRetry['data'];
+                    echo "[Erro] Falha definitiva no Ticket #$id: $error\n";
+                }
             }
         }
         echo "Correção finalizada.\n";
