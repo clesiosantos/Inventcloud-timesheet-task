@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.5.3
+ * Versão: 1.5.4
  */
 
 class EnvLoader {
@@ -11,8 +11,9 @@ class EnvLoader {
         $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
         foreach ($lines as $line) {
             if (strpos(trim($line), '#') === 0) continue;
-            list($name, $value) = explode('=', $line, 2);
-            $name = trim($name); $value = trim($value);
+            $parts = explode('=', $line, 2);
+            if (count($parts) !== 2) continue;
+            $name = trim($parts[0]); $value = trim($parts[1]);
             if (!array_key_exists($name, $_SERVER)) {
                 putenv("$name=$value");
                 $_ENV[$name] = $value;
@@ -35,12 +36,19 @@ class GLPISync {
         $this->initDatabase();
     }
 
+    private function getEnvVar($name) {
+        // Tenta pegar com underscore e com hífen para garantir compatibilidade
+        $val = getenv($name);
+        if (!$val) $val = getenv(str_replace('_', '-', $name));
+        return $val;
+    }
+
     private function initDatabase() {
         try {
             $this->db = new PDO(
-                "mysql:host=".getenv('DB_HOST').";dbname=".getenv('DB_NAME').";charset=utf8",
-                getenv('DB_USER'),
-                getenv('DB_PASS')
+                "mysql:host=".$this->getEnvVar('DB_HOST').";dbname=".$this->getEnvVar('DB_NAME').";charset=utf8",
+                $this->getEnvVar('DB_USER'),
+                $this->getEnvVar('DB_PASS')
             );
             $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         } catch (PDOException $e) {
@@ -67,11 +75,11 @@ class GLPISync {
     }
 
     private function callAPI($endpoint, $method = 'GET', $params = []) {
-        $url = getenv('GLPI_URL') . '/' . $endpoint;
+        $url = $this->getEnvVar('GLPI_URL') . '/' . $endpoint;
         $ch = curl_init($url);
         $headers = [
             'Content-Type: application/json',
-            'App-Token: ' . getenv('App-Token'), // Nota: Mantenha a consistência do nome se mudou no .env
+            'App-Token: ' . $this->getEnvVar('APP_TOKEN'),
             'Session-Token: ' . $this->sessionToken
         ];
 
@@ -90,17 +98,37 @@ class GLPISync {
     }
 
     private function initSession() {
-        $url = getenv('GLPI_URL') . '/initSession';
+        $url = $this->getEnvVar('GLPI_URL') . '/initSession';
         $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        
+        $headers = [
             'Content-Type: application/json',
-            'App-Token: ' . getenv('App-Token'),
-            'Authorization: user_token ' . getenv('USER_TOKEN')
-        ]);
+            'App-Token: ' . $this->getEnvVar('APP_TOKEN'),
+            'Authorization: user_token ' . $this->getEnvVar('USER_TOKEN')
+        ];
+
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        
         $responseRaw = curl_exec($ch);
-        $response = json_decode($responseRaw, true);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
         curl_close($ch);
+
+        if ($error) {
+            $this->log('Erro', "Falha na conexão cURL: $error");
+            return false;
+        }
+
+        $response = json_decode($responseRaw, true);
+
+        if ($httpCode !== 200) {
+            $msg = $response[0] ?? ($response['message'] ?? 'Erro desconhecido');
+            if (is_array($msg)) $msg = implode(' ', $msg);
+            $this->log('Erro', "API recusou autenticação (HTTP $httpCode): $msg");
+            return false;
+        }
+
         return $response['session_token'] ?? false;
     }
 
@@ -110,8 +138,7 @@ class GLPISync {
 
         $this->sessionToken = $this->initSession();
         if (!$this->sessionToken) {
-            $this->log('Erro', 'Falha na autenticação da API');
-            return;
+            return; // O erro já foi logado no initSession
         }
 
         try {
@@ -149,8 +176,11 @@ class GLPISync {
             $stmt->execute();
             $pendentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
+            if (count($pendentes) === 0) {
+                $this->log('Info', "Nenhum dado pendente para processar" . ($targetTicketId ? " (Ticket #$targetTicketId)" : ""));
+            }
+
             foreach ($pendentes as $task) {
-                // 1. Inserir Tarefa
                 $payloadTask = [
                     'tickets_id' => (int)$task['ticket_id'],
                     'content' => $task['titulo'],
@@ -163,12 +193,10 @@ class GLPISync {
                     'users_id_tech' => (int)$task['requisitante_id']
                 ];
 
-                // Preencher Categoria da Tarefa se houver código
                 if ((int)$task['tipo_atend_cod'] > 0) {
                     $payloadTask['taskcategories_id'] = (int)$task['tipo_atend_cod'];
                 }
 
-                // Preencher Grupo Técnico se houver
                 if ((int)$task['area_atuacao_codigo'] > 0) {
                     $payloadTask['groups_id_tech'] = (int)$task['area_atuacao_codigo'];
                 }
@@ -178,7 +206,6 @@ class GLPISync {
                 if ($resTask['code'] == 201) {
                     $this->log('Sucesso', "Tarefa inserida no Ticket #{$task['ticket_id']}");
                     
-                    // 2. Fechar Chamado (Status 6)
                     $payloadTicket = [
                         'id' => (int)$task['ticket_id'],
                         'status' => 6 
