@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.5.5
+ * Versão: 1.5.6
  */
 
 class EnvLoader {
@@ -142,7 +142,10 @@ class GLPISync {
                     MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END) AS data_inicio,
                     MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END) AS data_fim,
                     MAX(CASE WHEN t.id_pergunta = 1654 THEN t.grupo_id END) AS area_atuacao_codigo,
-                    MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) AS tipo_atend_cod,
+                    CASE 
+                        WHEN MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) = 'Comercial' THEN 1
+                        WHEN MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) = 'Fora do Horario' THEN 2
+                    END AS tipo_atend_cod,
                     TIMESTAMPDIFF(SECOND, MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END), MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END)) AS segundos
                 FROM (
                     SELECT fa.id AS resposta_id, fa.requester_id, it.tickets_id AS ticket_id, q.id AS id_pergunta, a.answer AS resposta, g.id AS grupo_id
@@ -184,9 +187,6 @@ class GLPISync {
                     'users_id_tech' => (int)$task['requisitante_id']
                 ];
 
-                // DEBUG: Logar o valor bruto da categoria vindo do SQL
-                $this->log('Debug', "Ticket #{$task['ticket_id']} - Valor Categoria (1655): " . ($task['tipo_atend_cod'] ?? 'NULL'));
-
                 if ((int)$task['tipo_atend_cod'] > 0) {
                     $payloadTask['taskcategories_id'] = (int)$task['tipo_atend_cod'];
                 }
@@ -196,7 +196,7 @@ class GLPISync {
                 }
 
                 // Logar payload final para conferência
-                $this->log('Debug', "Payload enviado para TicketTask", $payloadTask);
+                $this->log('Debug', "Payload enviado para TicketTask (Ticket #{$task['ticket_id']})", $payloadTask);
 
                 $resTask = $this->callAPI('TicketTask', 'POST', $payloadTask);
 
