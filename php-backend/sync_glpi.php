@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.3.0
+ * Versão: 1.4.0
  */
 
 class EnvLoader {
@@ -100,9 +100,10 @@ class GLPISync {
         return $response['session_token'] ?? false;
     }
 
-    public function run() {
+    public function run($targetTicketId = null) {
         $startTime = microtime(true);
-        $this->log('Info', 'Iniciando processamento da cron');
+        $msgInicio = $targetTicketId ? "Iniciando teste para Ticket #$targetTicketId" : "Iniciando processamento da cron";
+        $this->log('Info', $msgInicio);
 
         $this->sessionToken = $this->initSession();
         if (!$this->sessionToken) {
@@ -111,6 +112,8 @@ class GLPISync {
         }
 
         try {
+            $filterSql = $targetTicketId ? "AND t.ticket_id = :ticket_id" : "";
+            
             $sql = "
                 SELECT
                     t.resposta_id, t.ticket_id, u.id AS requisitante_id, u.name AS requisitante,
@@ -136,11 +139,16 @@ class GLPISync {
                 ) t
                 LEFT JOIN glpi_users u ON u.id = t.requester_id
                 WHERE t.ticket_id IS NOT NULL
+                $filterSql
                 AND NOT EXISTS (SELECT 1 FROM glpi_tickettasks tt WHERE tt.tickets_id = t.ticket_id)
                 GROUP BY t.resposta_id, t.ticket_id, u.id, u.name
                 ORDER BY t.resposta_id";
 
-            $stmt = $this->db->query($sql);
+            $stmt = $this->db->prepare($sql);
+            if ($targetTicketId) {
+                $stmt->bindParam(':ticket_id', $targetTicketId, PDO::PARAM_INT);
+            }
+            $stmt->execute();
             $pendentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
             $this->log('Info', count($pendentes) . ' tarefas pendentes encontradas');
@@ -178,4 +186,6 @@ class GLPISync {
 }
 
 $sync = new GLPISync();
-$sync->run();
+// Pega o ticket_id se passado como argumento: php sync_glpi.php 1234
+$ticketArg = isset($argv[1]) ? (int)$argv[1] : null;
+$sync->run($ticketArg);
