@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.6.1
+ * Versão: 1.6.2
  */
 
 class EnvLoader {
@@ -139,6 +139,7 @@ class GLPISync {
                 SELECT
                     t.ticket_id,
                     tk.status AS ticket_status,
+                    tk.date AS data_abertura,
                     tk.date_mod AS data_modificacao,
                     tk.solvedate AS data_solucao,
                     tk.closedate AS data_fechamento,
@@ -168,7 +169,7 @@ class GLPISync {
                 WHERE t.ticket_id IS NOT NULL
                 $filterSql
                 AND NOT EXISTS (SELECT 1 FROM glpi_tickettasks tt WHERE tt.tickets_id = t.ticket_id)
-                GROUP BY t.ticket_id, tk.status, tk.date_mod, tk.solvedate, tk.closedate, u.id
+                GROUP BY t.ticket_id, tk.date, tk.status, tk.date_mod, tk.solvedate, tk.closedate, u.id
                 ORDER BY t.ticket_id";
 
             $stmt = $this->db->prepare($sql);
@@ -186,17 +187,14 @@ class GLPISync {
                 
                 $this->log('Info', "Ticket #$ticketId - Status Atual: " . $row['ticket_status']);
 
-                // 1. Reabrir apenas se estiver fechado (status 6)
                 if ($isClosed) {
                     $resReopen = $this->callAPI("Ticket/$ticketId", 'PUT', ['id' => $ticketId, 'status' => 2]);
                     if ($resReopen['code'] != 200) {
                         $this->log('Erro', "Falha ao reabrir Ticket #$ticketId", ['response' => $resReopen['data']]);
                         continue;
                     }
-                    $this->log('Sucesso', "Ticket #$ticketId reaberto temporariamente");
                 }
 
-                // 2. Inserir a Tarefa
                 $payloadTask = [
                     'tickets_id' => $ticketId,
                     'content' => $row['titulo'],
@@ -219,24 +217,22 @@ class GLPISync {
                 if ($resTask['code'] == 201) {
                     $this->log('Sucesso', "Tarefa inserida no Ticket #$ticketId");
                     
-                    // 3. Finalizar Chamado
-                    $payloadFinal = ['id' => $ticketId, 'status' => 6];
-                    
-                    // Se estava fechado, restauramos as datas originais
-                    if ($isClosed) {
-                        $payloadFinal['date_mod'] = $row['data_modificacao'];
-                        $payloadFinal['solvedate'] = $row['data_solucao'];
-                        $payloadFinal['closedate'] = $row['data_fechamento'];
-                    }
+                    // Finalizar Chamado usando a data de abertura para solução e fechamento
+                    $payloadFinal = [
+                        'id' => $ticketId, 
+                        'status' => 6,
+                        'solvedate' => $row['data_abertura'],
+                        'closedate' => $row['data_abertura'],
+                        'date_mod' => $row['data_modificacao']
+                    ];
                     
                     $resFinal = $this->callAPI("Ticket/$ticketId", 'PUT', $payloadFinal);
                     
                     if ($resFinal['code'] == 200) {
-                        $this->log('Sucesso', "Ticket #$ticketId finalizado" . ($isClosed ? " com datas restauradas" : ""));
+                        $this->log('Sucesso', "Ticket #$ticketId finalizado com datas sincronizadas com a abertura");
                     }
                 } else {
                     $this->log('Erro', "Falha na tarefa do Ticket #$ticketId", ['response' => $resTask['data']]);
-                    // Tentar voltar para o status original se houver erro
                     if ($isClosed) $this->callAPI("Ticket/$ticketId", 'PUT', ['id' => $ticketId, 'status' => 6]);
                 }
             }
