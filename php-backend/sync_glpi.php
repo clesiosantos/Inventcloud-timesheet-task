@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.4.3
+ * Versão: 1.4.4
  */
 
 class EnvLoader {
@@ -162,29 +162,20 @@ class GLPISync {
             foreach ($pendentes as $task) {
                 $prefix = $task['tipo_atendimento'] ? "[{$task['tipo_atendimento']}] " : "";
                 
+                // PAYLOAD MINIMIZADO PARA TESTE DE PERMISSÃO
                 $payload = [
                     'tickets_id' => (int)$task['ticket_id'],
                     'content' => $prefix . $task['titulo'],
                     'actiontime' => (int)$task['segundos'],
                     'begin' => $task['data_inicio'],
                     'end' => $task['data_fim'],
-                    'is_private' => 1,
-                    'state' => 2
+                    'is_private' => 0, // Tentar como pública
+                    'state' => 2       // Mantido como "Feito"
                 ];
 
-                // Atribui o requisitante do formulário como técnico da tarefa
+                // Atribuição de técnico (opcional, vamos manter para ver se o erro é aqui)
                 if ((int)$task['requisitante_id'] > 0) {
                     $payload['users_id_tech'] = (int)$task['requisitante_id'];
-                }
-
-                // Atribui o grupo se existir
-                if ((int)$task['area_atuacao_codigo'] > 0) {
-                    $payload['groups_id_tech'] = (int)$task['area_atuacao_codigo'];
-                }
-                
-                // Atribui a categoria se existir
-                if ((int)$task['tipo_atendimento_codigo'] > 0) {
-                    $payload['taskcategories_id'] = (int)$task['tipo_atendimento_codigo'];
                 }
 
                 $res = $this->callAPI('TicketTask', 'POST', $payload);
