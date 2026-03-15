@@ -1,9 +1,8 @@
-= 5) e restaurada a privacidade da tarefa.">
 <?php
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.4.5
+ * Versão: 1.5.0
  */
 
 class EnvLoader {
@@ -65,9 +64,6 @@ class GLPISync {
         $color = ($status === 'Erro') ? "\033[31m" : (($status === 'Sucesso') ? "\033[32m" : "\033[36m");
         $reset = "\033[0m";
         echo "{$color}[$status]{$reset} " . date('H:i:s') . " - $message\n";
-        if (!empty($extra) && $status === 'Erro') {
-            echo "         Detalhamento: " . json_encode($extra, JSON_UNESCAPED_UNICODE) . "\n";
-        }
     }
 
     private function callAPI($endpoint, $method = 'GET', $params = []) {
@@ -81,7 +77,7 @@ class GLPISync {
 
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-        if ($method === 'POST') {
+        if (in_array($method, ['POST', 'PUT'])) {
             curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['input' => $params]));
         }
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
@@ -110,31 +106,25 @@ class GLPISync {
 
     public function run($targetTicketId = null) {
         $startTime = microtime(true);
-        $this->log('Info', $targetTicketId ? "Iniciando teste para Ticket #$targetTicketId" : "Iniciando processamento");
+        $this->log('Info', "Iniciando processamento");
 
         $this->sessionToken = $this->initSession();
         if (!$this->sessionToken) {
-            $this->log('Erro', 'Falha na autenticação da API (Verifique App-Token e User-Token)');
+            $this->log('Erro', 'Falha na autenticação da API');
             return;
         }
 
         try {
             $filterSql = $targetTicketId ? "AND t.ticket_id = :ticket_id" : "";
             
-            // SQL Atualizado: Agora junta com a tabela glpi_tickets para validar o status
             $sql = "
                 SELECT
-                    t.resposta_id, t.ticket_id, u.id AS requisitante_id, u.name AS requisitante,
+                    t.resposta_id, t.ticket_id, u.id AS requisitante_id,
                     MAX(CASE WHEN t.id_pergunta = 1643 THEN t.resposta END) AS titulo,
                     MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END) AS data_inicio,
                     MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END) AS data_fim,
                     MAX(CASE WHEN t.id_pergunta = 1654 THEN t.grupo_id END) AS area_atuacao_codigo,
                     MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) AS tipo_atendimento,
-                    CASE 
-                        WHEN MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) = 'Comercial' THEN 1
-                        WHEN MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) = 'Plantão' THEN 2
-                        ELSE 0
-                    END AS tipo_atendimento_codigo,
                     TIMESTAMPDIFF(SECOND, MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END), MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END)) AS segundos
                 FROM (
                     SELECT fa.id AS resposta_id, fa.requester_id, it.tickets_id AS ticket_id, q.id AS id_pergunta, a.answer AS resposta, g.id AS grupo_id
@@ -148,52 +138,56 @@ class GLPISync {
                 LEFT JOIN glpi_users u ON u.id = t.requester_id
                 JOIN glpi_tickets gt ON gt.id = t.ticket_id
                 WHERE t.ticket_id IS NOT NULL
-                AND gt.status < 5 -- Apenas chamados que não estejam Solucionados (5) ou Fechados (6)
+                AND gt.status < 5 
                 $filterSql
                 AND NOT EXISTS (SELECT 1 FROM glpi_tickettasks tt WHERE tt.tickets_id = t.ticket_id)
-                GROUP BY t.resposta_id, t.ticket_id, u.id, u.name
+                GROUP BY t.resposta_id, t.ticket_id, u.id
                 ORDER BY t.resposta_id";
 
             $stmt = $this->db->prepare($sql);
-            if ($targetTicketId) {
-                $stmt->bindParam(':ticket_id', $targetTicketId, PDO::PARAM_INT);
-            }
+            if ($targetTicketId) $stmt->bindParam(':ticket_id', $targetTicketId, PDO::PARAM_INT);
             $stmt->execute();
             $pendentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
-            $this->log('Info', count($pendentes) . ' tarefas pendentes em chamados ABERTOS encontradas');
-
             foreach ($pendentes as $task) {
                 $prefix = $task['tipo_atendimento'] ? "[{$task['tipo_atendimento']}] " : "";
                 
-                $payload = [
+                // 1. Inserir Tarefa
+                $payloadTask = [
                     'tickets_id' => (int)$task['ticket_id'],
                     'content' => $prefix . $task['titulo'],
                     'actiontime' => (int)$task['segundos'],
                     'begin' => $task['data_inicio'],
                     'end' => $task['data_fim'],
-                    'is_private' => 1, // Voltamos para privada
-                    'state' => 2       // Done
+                    'is_private' => 1,
+                    'state' => 2,
+                    'users_id_tech' => (int)$task['requisitante_id']
                 ];
 
-                if ((int)$task['requisitante_id'] > 0) {
-                    $payload['users_id_tech'] = (int)$task['requisitante_id'];
-                }
-                
                 if ((int)$task['area_atuacao_codigo'] > 0) {
-                    $payload['groups_id_tech'] = (int)$task['area_atuacao_codigo'];
+                    $payloadTask['groups_id_tech'] = (int)$task['area_atuacao_codigo'];
                 }
 
-                $res = $this->callAPI('TicketTask', 'POST', $payload);
+                $resTask = $this->callAPI('TicketTask', 'POST', $payloadTask);
 
-                if ($res['code'] == 201) {
-                    $this->log('Sucesso', "Tarefa inserida no Ticket #{$task['ticket_id']}", ['id' => $res['data']['id']]);
+                if ($resTask['code'] == 201) {
+                    $this->log('Sucesso', "Tarefa inserida no Ticket #{$task['ticket_id']}");
+                    
+                    // 2. Solucionar/Fechar Chamado
+                    $payloadTicket = [
+                        'id' => (int)$task['ticket_id'],
+                        'status' => 5 // 5 = Solucionado, 6 = Fechado
+                    ];
+                    
+                    $resTicket = $this->callAPI('Ticket/' . $task['ticket_id'], 'PUT', $payloadTicket);
+                    
+                    if ($resTicket['code'] == 200) {
+                        $this->log('Sucesso', "Ticket #{$task['ticket_id']} marcado como Solucionado");
+                    } else {
+                        $this->log('Erro', "Falha ao fechar Ticket #{$task['ticket_id']}", ['response' => $resTicket['data']]);
+                    }
                 } else {
-                    $this->log('Erro', "Falha ao inserir tarefa no Ticket #{$task['ticket_id']}", [
-                        'http_code' => $res['code'],
-                        'response' => $res['data'], 
-                        'payload' => $payload
-                    ]);
+                    $this->log('Erro', "Falha na tarefa do Ticket #{$task['ticket_id']}", ['response' => $resTask['data']]);
                 }
             }
 
