@@ -1,23 +1,31 @@
-# Monitor de Integração GLPI
+# Monitor de Integração GLPI (Timesheet Task)
 
-Automação de tarefas para GLPI 10 a partir de formulários Formcreator.
+Sistema de automação para transformar formulários do GLPI Formcreator em tarefas estruturadas com cálculo automático de tempo.
 
-## 🚀 Início Rápido
+## 🛠️ Operação do Backend
 
-1. **Configurar Backend**:
-   - Vá para `php-backend/`.
-   - Configure o arquivo `.env` com suas credenciais de banco e API.
-   - Teste a execução: `php sync_glpi.php`.
+O backend PHP reside em `/data/Inventcloud-timesheet-task/php-backend/`.
 
-2. **Configurar Frontend**:
-   - Instale as dependências: `npm install`.
-   - Inicie o painel: `npm run dev`.
+### Configuração
+As credenciais estão no arquivo `.env`. Nunca altere as URLs sem validar os tokens de acesso.
 
-3. **Automação**:
-   - Adicione o script `sync_glpi.php` ao seu CRON (recomendado a cada 10 min).
+### Automação (Cron)
+A tarefa está agendada para rodar a cada **5 minutos**.
+Para monitorar as execuções em tempo real:
+```bash
+tail -f /data/Inventcloud-timesheet-task/php-backend/logs/cron.log
+```
 
-## 📄 Documentação Completa
-Consulte o arquivo [DOCUMENTATION.md](./DOCUMENTATION.md) para detalhes de mapeamento de campos, requisitos e arquitetura.
+## 🖥️ Painel de Monitoramento (Frontend)
+
+O painel visual permite acompanhar se os tickets estão sendo processados corretamente.
+
+1. Instale as dependências: `npm install`
+2. Inicie o servidor: `npm run dev`
+
+## 📂 Estrutura de Logs
+*   `php-backend/logs/sync_YYYY-MM-DD.json`: Logs detalhados de cada ticket processado.
+*   `php-backend/logs/cron.log`: Registro de saída bruta do agendador do Linux.
 
 ---
-*Desenvolvido com Dyad AI.*
+*Desenvolvido por Dyad AI.*
