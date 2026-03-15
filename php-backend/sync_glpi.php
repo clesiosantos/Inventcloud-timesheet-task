@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.5.2
+ * Versão: 1.5.3
  */
 
 class EnvLoader {
@@ -71,7 +71,7 @@ class GLPISync {
         $ch = curl_init($url);
         $headers = [
             'Content-Type: application/json',
-            'App-Token: ' . getenv('APP_TOKEN'),
+            'App-Token: ' . getenv('App-Token'), // Nota: Mantenha a consistência do nome se mudou no .env
             'Session-Token: ' . $this->sessionToken
         ];
 
@@ -95,7 +95,7 @@ class GLPISync {
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             'Content-Type: application/json',
-            'App-Token: ' . getenv('APP_TOKEN'),
+            'App-Token: ' . getenv('App-Token'),
             'Authorization: user_token ' . getenv('USER_TOKEN')
         ]);
         $responseRaw = curl_exec($ch);
@@ -124,7 +124,7 @@ class GLPISync {
                     MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END) AS data_inicio,
                     MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END) AS data_fim,
                     MAX(CASE WHEN t.id_pergunta = 1654 THEN t.grupo_id END) AS area_atuacao_codigo,
-                    MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) AS tipo_atendimento,
+                    MAX(CASE WHEN t.id_pergunta = 1655 THEN t.resposta END) AS tipo_atend_cod,
                     TIMESTAMPDIFF(SECOND, MAX(CASE WHEN t.id_pergunta = 1651 THEN t.resposta END), MAX(CASE WHEN t.id_pergunta = 1652 THEN t.resposta END)) AS segundos
                 FROM (
                     SELECT fa.id AS resposta_id, fa.requester_id, it.tickets_id AS ticket_id, q.id AS id_pergunta, a.answer AS resposta, g.id AS grupo_id
@@ -150,21 +150,25 @@ class GLPISync {
             $pendentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
             foreach ($pendentes as $task) {
-                $prefix = $task['tipo_atendimento'] ? "[{$task['tipo_atendimento']}] " : "";
-                
                 // 1. Inserir Tarefa
                 $payloadTask = [
                     'tickets_id' => (int)$task['ticket_id'],
-                    'content' => $prefix . $task['titulo'],
+                    'content' => $task['titulo'],
                     'actiontime' => (int)$task['segundos'],
                     'begin' => $task['data_inicio'],
                     'end' => $task['data_fim'],
                     'is_private' => 1,
                     'state' => 2,
-                    'users_id' => (int)$task['requisitante_id'], // Autor da tarefa
-                    'users_id_tech' => (int)$task['requisitante_id'] // Técnico da tarefa
+                    'users_id' => (int)$task['requisitante_id'],
+                    'users_id_tech' => (int)$task['requisitante_id']
                 ];
 
+                // Preencher Categoria da Tarefa se houver código
+                if ((int)$task['tipo_atend_cod'] > 0) {
+                    $payloadTask['taskcategories_id'] = (int)$task['tipo_atend_cod'];
+                }
+
+                // Preencher Grupo Técnico se houver
                 if ((int)$task['area_atuacao_codigo'] > 0) {
                     $payloadTask['groups_id_tech'] = (int)$task['area_atuacao_codigo'];
                 }
@@ -177,7 +181,7 @@ class GLPISync {
                     // 2. Fechar Chamado (Status 6)
                     $payloadTicket = [
                         'id' => (int)$task['ticket_id'],
-                        'status' => 6 // 6 = Fechado
+                        'status' => 6 
                     ];
                     
                     $resTicket = $this->callAPI('Ticket/' . $task['ticket_id'], 'PUT', $payloadTicket);
