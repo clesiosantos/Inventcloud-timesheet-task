@@ -1,80 +1,73 @@
 # Documentação Técnica: Ecossistema de Integração GLPI 10
 
-Este sistema automatiza a criação de tarefas (**TicketTasks**) no GLPI 10 a partir de formulários do plugin **Formcreator** (ID 142), garantindo que o tempo de atendimento seja registrado corretamente e o chamado seja encerrado de forma estruturada.
+Este sistema automatiza a criação de tarefas (**TicketTasks**) no GLPI 10 a partir de formulários do plugin **Formcreator** (ID 142). Ele garante a integridade dos dados de tempo e sincroniza o fechamento dos chamados.
 
-## 1. Arquitetura e Fluxo de Dados
+## 1. Arquitetura do Sistema
 
-O sistema opera em um modelo híbrido:
-1.  **Extração (SQL):** O script PHP lê diretamente do banco de dados do GLPI as respostas do Formcreator.
-2.  **Processamento (PHP):** Consolida respostas em colunas (Pivot) e calcula a duração da tarefa.
-3.  **Carga (API REST):** Insere a tarefa no chamado correspondente via API oficial do GLPI.
-4.  **Monitoramento (React/Vite):** Um painel web consome os logs JSON gerados para visualização do status das operações.
+O sistema utiliza PHP para a lógica de backend (automação) e React para a interface de monitoramento.
 
----
-
-## 2. Requisitos de Ambiente
-
-*   **Servidor:** Linux (caminho base: `/data/Inventcloud-timesheet-task/`)
-*   **GLPI:** Versão 10.x com API REST ativa.
-*   **Banco de Dados:** MySQL/MariaDB com acesso de leitura/escrita.
-*   **Tokens:** `App-Token` (da API) e `User-Token` (do técnico executor).
+- **Backend:** Scripts PHP que consultam o banco de dados via PDO e realizam escritas via API REST do GLPI.
+- **Frontend:** Dashboard em React/Vite para auditoria de logs e status.
 
 ---
 
-## 3. Mapeamento de Campos (Formulário 142)
+## 2. Tabela Comparativa (Mapeamento de Dados)
 
-| Pergunta ID | Descrição no Formcreator | Campo API GLPI | Lógica / Formato |
+Esta tabela descreve como os dados capturados no formulário são transformados em campos da tarefa no GLPI.
+
+| Origem (Formcreator ID 142) | Campo Destino (API GLPI) | Tipo de Dado | Lógica de Conversão |
 | :--- | :--- | :--- | :--- |
-| **1643** | Título/Descrição da Tarefa | `content` | Texto simples |
-| **1651** | Data/Hora de Início | `begin` | YYYY-MM-DD HH:MM:SS |
-| **1652** | Data/Hora de Fim | `end` | YYYY-MM-DD HH:MM:SS |
-| **1654** | Área de Atuação | `groups_id_tech` | ID do Grupo (Mapeado via SQL) |
-| **1655** | Tipo de Atendimento | `taskcategories_id` | Mapeado: Comercial (1), Outros (2) |
-| **Cálculo** | Diferença entre 1652 e 1651 | `actiontime` | Inteiro em segundos |
+| Pergunta ID 1643 | `content` | String | Texto bruto da resposta |
+| Pergunta ID 1651 (Início) | `begin` | Datetime | Formato Y-m-d H:i:s |
+| Pergunta ID 1652 (Fim) | `end` | Datetime | Formato Y-m-d H:i:s |
+| Diferença (1652 - 1651) | `actiontime` | Integer | Calculado em Segundos |
+| Pergunta ID 1654 (Área) | `groups_id_tech` | ID (FK) | ID do grupo técnico mapeado |
+| Pergunta ID 1655 (Tipo) | `taskcategories_id` | ID (FK) | Mapeamento: Comercial=1, Outros=2 |
+| Requester ID | `users_id_tech` | ID (FK) | Atribuído ao técnico que abriu o form |
 
 ---
 
-## 4. Componentes do Sistema
+## 3. Configuração da Automação (Cron)
 
-### 4.1. Sincronizador Principal (`sync_glpi.php`)
-Localizado em `php-backend/sync_glpi.php`. 
-*   Identifica chamados que vieram do formulário 142 e **não possuem tarefas**.
-*   Se o chamado estiver fechado (status 6), ele reabre temporariamente (status 2), insere a tarefa e fecha novamente.
-*   **Logs:** Gera arquivos JSON diários em `php-backend/logs/sync_YYYY-MM-DD.json`.
+Para que o sistema funcione sem intervenção humana, ele deve ser configurado no agendador de tarefas do Linux (**Crontab**).
 
-### 4.2. Corretor Retroativo (`fix_dates.php`)
-Localizado em `php-backend/fix_dates.php`.
-*   Corrige as datas de solução (`solvedate`) e fechamento (`closedate`) de chamados antigos para que coincidam com a data de abertura, evitando distorções em indicadores (SLA).
+### Parâmetros da Cron
+- **Frequência:** A cada 5 minutos (`*/5 * * * *`).
+- **Usuário Sugerido:** `root` ou usuário com permissão de escrita na pasta de logs.
+- **Caminho do Script:** `/data/Inventcloud-timesheet-task/php-backend/sync_glpi.php`.
 
-### 4.3. Dashboard de Monitoramento
-Interface React que exibe:
-*   Status do backend e conectividade.
-*   Taxa de sucesso/erro das últimas 24h.
-*   Tabela detalhada de logs para auditoria rápida.
+### Comando de Instalação
+Execute `crontab -e` e insira a linha abaixo ao final do arquivo:
 
----
-
-## 5. Automação (Cron Job)
-
-O sistema está configurado para rodar automaticamente a cada 5 minutos no servidor.
-
-**Linha de execução no Crontab:**
 ```bash
+# GATILHO DE SINCRONIZAÇÃO GLPI - TIMESHEET
 */5 * * * * php /data/Inventcloud-timesheet-task/php-backend/sync_glpi.php >> /data/Inventcloud-timesheet-task/php-backend/logs/cron.log 2>&1
 ```
 
----
-
-## 6. Comandos Úteis de Manutenção
-
-*   **Executar sincronização manualmente:**
-    `php /data/Inventcloud-timesheet-task/php-backend/sync_glpi.php`
-
-*   **Sincronizar um único ticket específico:**
-    `php /data/Inventcloud-timesheet-task/php-backend/sync_glpi.php [ID_DO_TICKET]`
-
-*   **Verificar erros da automação:**
-    `tail -f /data/Inventcloud-timesheet-task/php-backend/logs/cron.log`
+> **Nota:** O redirecionamento `>> .../cron.log 2>&1` garante que tanto as saídas de sucesso quanto os erros sejam registrados para auditoria.
 
 ---
-*Documentação atualizada em: 2024-05-20*
+
+## 4. Componentes de Software
+
+### 4.1. `sync_glpi.php` (O Motor)
+- Verifica tickets do Form 142 sem tarefas.
+- Gerencia o ciclo de status (Reabre se fechado -> Insere -> Fecha).
+- Gera logs diários em formato JSON para o Dashboard.
+
+### 4.2. `fix_dates.php` (Utilitário)
+- Script para correção em lote de datas de fechamento divergentes da data de abertura.
+
+### 4.3. Interface de Monitoramento
+- Localizada na raiz do projeto, acessível via porta configurada no Vite (ex: 8080).
+
+---
+
+## 5. Resolução de Problemas
+
+1. **Log de Erro Cron:** Verifique `/data/Inventcloud-timesheet-task/php-backend/logs/cron.log`.
+2. **Falha de API:** Valide se o `USER_TOKEN` e `APP_TOKEN` no arquivo `.env` não expiraram.
+3. **DB Connection:** Garanta que o host do banco de dados permita conexões do IP onde o script roda.
+
+---
+*Última atualização: 2024-05-20*
