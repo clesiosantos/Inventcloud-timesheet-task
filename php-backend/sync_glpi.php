@@ -2,7 +2,7 @@
 /**
  * Integração GLPI 10 - Sincronização de Tarefas (SQL -> API)
  * Autor: Dyad AI
- * Versão: 1.6.2
+ * Versão: 1.6.3
  */
 
 class EnvLoader {
@@ -127,7 +127,7 @@ class GLPISync {
 
     public function run($targetTicketId = null) {
         $startTime = microtime(true);
-        $this->log('Info', "Iniciando processamento");
+        $this->log('Info', "Iniciando processamento em lote");
 
         $this->sessionToken = $this->initSession();
         if (!$this->sessionToken) return;
@@ -177,22 +177,22 @@ class GLPISync {
             $stmt->execute();
             $pendentes = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
-            if (count($pendentes) === 0) {
-                $this->log('Info', "Nenhum dado pendente para processar");
+            $total = count($pendentes);
+            if ($total === 0) {
+                $this->log('Info', "Nenhum ticket sem tarefa encontrado.");
+            } else {
+                $this->log('Info', "Encontrados $total tickets para processar.");
             }
 
             foreach ($pendentes as $row) {
                 $ticketId = (int)$row['ticket_id'];
                 $isClosed = ((int)$row['ticket_status'] === 6);
                 
-                $this->log('Info', "Ticket #$ticketId - Status Atual: " . $row['ticket_status']);
+                $this->log('Info', "Ticket #$ticketId - Status: {$row['ticket_status']}. Preparando tarefa.");
 
+                // Se fechado, reabre primeiro
                 if ($isClosed) {
-                    $resReopen = $this->callAPI("Ticket/$ticketId", 'PUT', ['id' => $ticketId, 'status' => 2]);
-                    if ($resReopen['code'] != 200) {
-                        $this->log('Erro', "Falha ao reabrir Ticket #$ticketId", ['response' => $resReopen['data']]);
-                        continue;
-                    }
+                    $this->callAPI("Ticket/$ticketId", 'PUT', ['id' => $ticketId, 'status' => 2]);
                 }
 
                 $payloadTask = [
@@ -217,32 +217,29 @@ class GLPISync {
                 if ($resTask['code'] == 201) {
                     $this->log('Sucesso', "Tarefa inserida no Ticket #$ticketId");
                     
-                    // Finalizar Chamado usando a data de abertura para solução e fechamento
+                    // Finaliza sincronizando com a data de abertura
                     $payloadFinal = [
                         'id' => $ticketId, 
                         'status' => 6,
                         'solvedate' => $row['data_abertura'],
-                        'closedate' => $row['data_abertura'],
-                        'date_mod' => $row['data_modificacao']
+                        'closedate' => $row['data_abertura']
                     ];
                     
-                    $resFinal = $this->callAPI("Ticket/$ticketId", 'PUT', $payloadFinal);
-                    
-                    if ($resFinal['code'] == 200) {
-                        $this->log('Sucesso', "Ticket #$ticketId finalizado com datas sincronizadas com a abertura");
-                    }
+                    $this->callAPI("Ticket/$ticketId", 'PUT', $payloadFinal);
+                    $this->log('Sucesso', "Ticket #$ticketId finalizado.");
                 } else {
-                    $this->log('Erro', "Falha na tarefa do Ticket #$ticketId", ['response' => $resTask['data']]);
+                    $this->log('Erro', "Falha ao inserir tarefa no Ticket #$ticketId");
+                    // Se falhou e era fechado, tenta fechar de novo para não deixar aberto
                     if ($isClosed) $this->callAPI("Ticket/$ticketId", 'PUT', ['id' => $ticketId, 'status' => 6]);
                 }
             }
 
         } catch (Exception $e) {
-            $this->log('Erro', 'Exceção: ' . $e->getMessage());
+            $this->log('Erro', 'Exceção durante o lote: ' . $e->getMessage());
         }
 
         $duration = round(microtime(true) - $startTime, 2);
-        $this->log('Fim', 'Execução encerrada', ['duration' => $duration . 's']);
+        $this->log('Fim', 'Processamento concluído', ['duration' => $duration . 's']);
     }
 }
 
